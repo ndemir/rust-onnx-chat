@@ -17,25 +17,77 @@ struct ModelConfig {
     bos_token_id: u32,
     #[serde(default = "default_max_position_embeddings")]
     max_position_embeddings: usize,
+    #[serde(default = "default_max_position_embeddings")]
+    n_positions: usize,  // GPT2 style
     #[serde(default = "default_vocab_size")]
     vocab_size: usize,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 struct TokenizerConfig {
+    #[serde(default)]
     add_bos_token: bool,
+    #[serde(default)]
     add_eos_token: bool,
-    bos_token: String,
-    eos_token: String,
+    #[serde(default)]
+    bos_token: Option<String>,
+    #[serde(default)]
+    eos_token: Option<String>,
+    #[serde(default = "default_model_max_length")]
     model_max_length: usize,
     #[serde(default)]
     pad_token: Option<String>,
 }
 
+fn default_model_max_length() -> usize { 1024 }
+
 fn default_eos_token_id() -> u32 { 2 }
 fn default_bos_token_id() -> u32 { 1 }
 fn default_max_position_embeddings() -> usize { 2048 }
 fn default_vocab_size() -> usize { 32000 }
+
+#[derive(Debug, Clone)]
+struct SpecialToken {
+    content: String,
+    lstrip: bool,
+    normalized: bool,
+    rstrip: bool,
+    single_word: bool,
+}
+
+impl SpecialToken {
+    fn from_value(value: &serde_json::Value) -> Option<Self> {
+        match value {
+            serde_json::Value::String(s) => Some(SpecialToken {
+                content: s.clone(),
+                lstrip: false,
+                normalized: false,
+                rstrip: false,
+                single_word: false,
+            }),
+            serde_json::Value::Object(obj) => Some(SpecialToken {
+                content: obj.get("content")?.as_str()?.to_string(),
+                lstrip: obj.get("lstrip").and_then(|v| v.as_bool()).unwrap_or(false),
+                normalized: obj.get("normalized").and_then(|v| v.as_bool()).unwrap_or(false),
+                rstrip: obj.get("rstrip").and_then(|v| v.as_bool()).unwrap_or(false),
+                single_word: obj.get("single_word").and_then(|v| v.as_bool()).unwrap_or(false),
+            }),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SpecialTokensMap {
+    #[serde(default)]
+    bos_token: Option<serde_json::Value>,
+    #[serde(default)]
+    eos_token: Option<serde_json::Value>,
+    #[serde(default)]
+    unk_token: Option<serde_json::Value>,
+    #[serde(default)]
+    pad_token: Option<serde_json::Value>,
+}
 
 pub struct ChatBot {
     session: Option<Session>,
@@ -47,27 +99,33 @@ pub struct ChatBot {
     chat_template: String,
     config: ModelConfig,
     tokenizer_config: TokenizerConfig,
+    special_tokens_map: SpecialTokensMap,
+    eos_token_str: String,
+    bos_token_str: String,
 }
 
 impl ChatBot {
-    pub async fn new() -> Result<Self> {
-        println!("Initializing TinyLlama Chat Bot...");
+    pub async fn new(model_name: &str) -> Result<Self> {
+        println!("Initializing {} Chat Bot...", model_name);
         
         let environment = Arc::new(Environment::builder()
-            .with_name("tinyllama_chat_bot")
+            .with_name("onnx_chat_bot")
             .build()?);
 
-        let tokenizer_path = "models/tinyllama/tokenizer.json"; // Using native TinyLlama tokenizer
-        let model_path = "models/tinyllama/model.onnx";
-        let config_path = "models/tinyllama/config.json";
-        let tokenizer_config_path = "models/tinyllama/tokenizer_config.json";
+        let model_dir = format!("models/{}", model_name);
+        let tokenizer_path = format!("{}/tokenizer.json", model_dir);
+        let model_path = format!("{}/model.onnx", model_dir);
+        let config_path = format!("{}/config.json", model_dir);
+        let tokenizer_config_path = format!("{}/tokenizer_config.json", model_dir);
+        let special_tokens_map_path = format!("{}/special_tokens_map.json", model_dir);
+        let template_path = format!("{}/chat_template.jinja", model_dir);
         
         // Load tokenizer
-        println!("Loading native TinyLlama tokenizer (updated crate)...");
-        let tokenizer = if Path::new(tokenizer_path).exists() {
-            match Tokenizer::from_file(tokenizer_path) {
+        println!("Loading tokenizer for {}...", model_name);
+        let tokenizer = if Path::new(&tokenizer_path).exists() {
+            match Tokenizer::from_file(&tokenizer_path) {
                 Ok(tokenizer) => {
-                    println!("✅ Native TinyLlama tokenizer loaded successfully!");
+                    println!("✅ Tokenizer loaded successfully!");
                     tokenizer
                 },
                 Err(e) => {
@@ -82,8 +140,14 @@ impl ChatBot {
         println!("Loading model configuration...");
         let config_str = fs::read_to_string(config_path)
             .map_err(|e| anyhow!("Failed to load config.json: {}", e))?;
-        let config: ModelConfig = serde_json::from_str(&config_str)
+        let mut config: ModelConfig = serde_json::from_str(&config_str)
             .map_err(|e| anyhow!("Failed to parse config.json: {}", e))?;
+        
+        // Handle different naming conventions
+        if config.max_position_embeddings == 2048 && config.n_positions != 2048 {
+            config.max_position_embeddings = config.n_positions;
+        }
+        
         println!("📋 Model config loaded: max_position_embeddings={}, eos_token_id={}", 
                  config.max_position_embeddings, config.eos_token_id);
         
@@ -96,23 +160,49 @@ impl ChatBot {
         println!("📖 Tokenizer config loaded: add_bos_token={}, model_max_length={}", 
                  tokenizer_config.add_bos_token, tokenizer_config.model_max_length);
         
+        // Load special tokens map
+        println!("Loading special tokens map...");
+        let special_tokens_map_str = fs::read_to_string(special_tokens_map_path)
+            .map_err(|e| anyhow!("Failed to load special_tokens_map.json: {}", e))?;
+        let special_tokens_map: SpecialTokensMap = serde_json::from_str(&special_tokens_map_str)
+            .map_err(|e| anyhow!("Failed to parse special_tokens_map.json: {}", e))?;
+        
+        // Get actual token strings from special_tokens_map
+        let eos_token_str = special_tokens_map.eos_token.as_ref()
+            .and_then(|v| SpecialToken::from_value(v))
+            .map(|t| t.content)
+            .unwrap_or_else(|| "</s>".to_string());
+            
+        let bos_token_str = special_tokens_map.bos_token.as_ref()
+            .and_then(|v| SpecialToken::from_value(v))
+            .map(|t| t.content)
+            .unwrap_or_else(|| "<s>".to_string());
+            
+        println!("📑 Special tokens loaded: BOS='{}', EOS='{}'", bos_token_str, eos_token_str);
+        
         // Get token IDs from config
         let eos_token_id = config.eos_token_id;
         let bos_token_id = config.bos_token_id;
-        println!("🔚 EOS token ID: {}, BOS token ID: {}", eos_token_id, bos_token_id);
+        println!("🔚 Token IDs: EOS={}, BOS={}", eos_token_id, bos_token_id);
         
-        // Load Jinja template
-        let template_path = "models/tinyllama/chat_template.jinja";
-        let chat_template = fs::read_to_string(template_path)
-            .map_err(|e| anyhow!("Failed to load chat template: {}", e))?;
+        // Load Jinja template (optional)
+        let chat_template = if Path::new(&template_path).exists() {
+            println!("📝 Loading chat template...");
+            fs::read_to_string(&template_path)
+                .map_err(|e| anyhow!("Failed to load chat template: {}", e))?
+        } else {
+            println!("📝 No chat template found, using default");
+            // Default template for models without chat_template.jinja
+            String::from("{% for message in messages %}{{ message['content'] }}{% if not loop.last %} {% endif %}{% endfor %}{% if add_generation_prompt %}{% endif %}")
+        };
 
         // Try to load ONNX model
         println!("Looking for ONNX model at: {}", model_path);
-        let (session, model_loaded) = if Path::new(model_path).exists() {
-            println!("Loading TinyLlama ONNX model...");
-            match SessionBuilder::new(&environment)?.with_model_from_file(model_path) {
+        let (session, model_loaded) = if Path::new(&model_path).exists() {
+            println!("Loading {} ONNX model...", model_name);
+            match SessionBuilder::new(&environment)?.with_model_from_file(&model_path) {
                 Ok(session) => {
-                    println!("✅ TinyLlama ONNX model loaded successfully!");
+                    println!("✅ {} ONNX model loaded successfully!", model_name);
                     println!("🎯 Full AI chat inference ready!");
                     (Some(session), true)
                 },
@@ -135,6 +225,9 @@ impl ChatBot {
             chat_template,
             config,
             tokenizer_config,
+            special_tokens_map,
+            eos_token_str,
+            bos_token_str,
         })
     }
 
@@ -167,36 +260,52 @@ impl ChatBot {
         let session = self.session.as_ref().unwrap();
         
         // Build messages array for Jinja template
-        let mut messages = vec![
-            serde_json::json!({
+        let mut messages = vec![];
+        
+        // Check if this is a chat model by looking for role markers in template
+        let is_chat_model = self.chat_template.contains("system") || 
+                           self.chat_template.contains("user") || 
+                           self.chat_template.contains("assistant");
+        
+        // Only add system message for chat models
+        if is_chat_model {
+            messages.push(serde_json::json!({
                 "role": "system",
                 "content": "You are ChatBOT, a helpful, friendly, and knowledgeable AI assistant. Your name is ChatBOT. When introducing yourself, always use the name ChatBOT. Provide clear, detailed, and conversational responses. Be helpful and engaging while staying informative."
-            })
-        ];
-        
-        // Add conversation history for context (last 3 exchanges to avoid token limits)
-        let recent_history = self.conversation_history
-            .iter()
-            .rev()
-            .take(3)
-            .rev();
-            
-        for (user_msg, assistant_msg) in recent_history {
-            messages.push(serde_json::json!({
-                "role": "user",
-                "content": user_msg
-            }));
-            messages.push(serde_json::json!({
-                "role": "assistant",
-                "content": assistant_msg
             }));
         }
         
-        // Add current user message
-        messages.push(serde_json::json!({
-            "role": "user",
-            "content": input.trim()
-        }));
+        // Add conversation history for context (last 3 exchanges to avoid token limits)
+        if is_chat_model {
+            let recent_history = self.conversation_history
+                .iter()
+                .rev()
+                .take(3)
+                .rev();
+                
+            for (user_msg, assistant_msg) in recent_history {
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": user_msg
+                }));
+                messages.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": assistant_msg
+                }));
+            }
+            
+            // Add current user message
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": input.trim()
+            }));
+        } else {
+            // For non-chat models, just use the input as a single message
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": input.trim()
+            }));
+        }
         
         // Render the conversation using Jinja template
         let mut jinja_env = minijinja::Environment::new();
@@ -208,7 +317,7 @@ impl ChatBot {
         
         let conversation = tmpl.render(context! {
             messages => messages,
-            eos_token => "</s>",
+            eos_token => &self.eos_token_str,
             add_generation_prompt => true
         }).map_err(|e| anyhow!("Failed to render template: {}", e))?;
         

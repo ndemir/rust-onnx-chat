@@ -1,11 +1,16 @@
 use std::io::{self, Write, IsTerminal, Read};
 use anyhow::Result;
+use std::env;
 
 mod chat;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut chat_bot = chat::ChatBot::new().await?;
+    // Get model name from command line args or default to tinyllama
+    let args: Vec<String> = env::args().collect();
+    let model_name = args.get(1).map(|s| s.as_str()).unwrap_or("tinyllama");
+    
+    let mut chat_bot = chat::ChatBot::new(model_name).await?;
     
     // Check if input is piped or interactive
     if io::stdin().is_terminal() {
