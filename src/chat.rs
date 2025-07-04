@@ -6,6 +6,25 @@ use tokenizers::Tokenizer;
 use ndarray::{ArrayD, CowArray};
 use minijinja::context;
 use std::fs;
+use serde::{Deserialize, Serialize};
+use serde_json;
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ModelConfig {
+    #[serde(default = "default_eos_token_id")]
+    eos_token_id: u32,
+    #[serde(default = "default_bos_token_id")]
+    bos_token_id: u32,
+    #[serde(default = "default_max_position_embeddings")]
+    max_position_embeddings: usize,
+    #[serde(default = "default_vocab_size")]
+    vocab_size: usize,
+}
+
+fn default_eos_token_id() -> u32 { 2 }
+fn default_bos_token_id() -> u32 { 1 }
+fn default_max_position_embeddings() -> usize { 2048 }
+fn default_vocab_size() -> usize { 32000 }
 
 pub struct ChatBot {
     session: Option<Session>,
@@ -14,6 +33,7 @@ pub struct ChatBot {
     eos_token_id: u32,
     conversation_history: Vec<(String, String)>, // (user, assistant) pairs
     chat_template: String,
+    config: ModelConfig,
 }
 
 impl ChatBot {
@@ -26,6 +46,7 @@ impl ChatBot {
 
         let tokenizer_path = "models/tinyllama/tokenizer.json"; // Using native TinyLlama tokenizer
         let model_path = "models/tinyllama/model.onnx";
+        let config_path = "models/tinyllama/config.json";
         
         // Load tokenizer
         println!("Loading native TinyLlama tokenizer (updated crate)...");
@@ -43,9 +64,18 @@ impl ChatBot {
             return Err(anyhow!("Tokenizer not found at {}", tokenizer_path));
         };
 
-        // Get EOS token ID from tokenizer
-        let eos_token_id = tokenizer.token_to_id("</s>").unwrap_or(2); // TinyLlama uses </s> as EOS
-        println!("🔚 EOS token ID: {}", eos_token_id);
+        // Load model configuration
+        println!("Loading model configuration...");
+        let config_str = fs::read_to_string(config_path)
+            .map_err(|e| anyhow!("Failed to load config.json: {}", e))?;
+        let config: ModelConfig = serde_json::from_str(&config_str)
+            .map_err(|e| anyhow!("Failed to parse config.json: {}", e))?;
+        println!("📋 Model config loaded: max_position_embeddings={}, eos_token_id={}", 
+                 config.max_position_embeddings, config.eos_token_id);
+        
+        // Get EOS token ID from config (preferred) or tokenizer
+        let eos_token_id = config.eos_token_id;
+        println!("🔚 EOS token ID from config: {}", eos_token_id);
         
         // Load Jinja template
         let template_path = "models/tinyllama/chat_template.jinja";
@@ -78,6 +108,7 @@ impl ChatBot {
             eos_token_id,
             conversation_history: Vec::new(),
             chat_template,
+            config,
         })
     }
 
@@ -177,9 +208,10 @@ impl ChatBot {
         for step in 0..max_new_tokens {
             let seq_len = current_tokens.len();
             
-            // Check token limit (TinyLlama has 2048 context)
-            if seq_len > 1800 {
-                println!("⚠️ Approaching token limit, stopping generation");
+            // Check token limit from config
+            if seq_len > self.config.max_position_embeddings - 200 {
+                println!("⚠️ Approaching token limit ({}/{}), stopping generation", 
+                         seq_len, self.config.max_position_embeddings);
                 break;
             }
             
