@@ -4,6 +4,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tokenizers::Tokenizer;
 use ndarray::{ArrayD, CowArray};
+use minijinja::context;
+use std::fs;
 
 pub struct ChatBot {
     session: Option<Session>,
@@ -11,6 +13,7 @@ pub struct ChatBot {
     model_loaded: bool,
     eos_token_id: u32,
     conversation_history: Vec<(String, String)>, // (user, assistant) pairs
+    chat_template: String,
 }
 
 impl ChatBot {
@@ -43,6 +46,11 @@ impl ChatBot {
         // Get EOS token ID from tokenizer
         let eos_token_id = tokenizer.token_to_id("</s>").unwrap_or(2); // TinyLlama uses </s> as EOS
         println!("🔚 EOS token ID: {}", eos_token_id);
+        
+        // Load Jinja template
+        let template_path = "models/tinyllama/chat_template.jinja";
+        let chat_template = fs::read_to_string(template_path)
+            .map_err(|e| anyhow!("Failed to load chat template: {}", e))?;
 
         // Try to load ONNX model
         println!("Looking for ONNX model at: {}", model_path);
@@ -69,6 +77,7 @@ impl ChatBot {
             model_loaded,
             eos_token_id,
             conversation_history: Vec::new(),
+            chat_template,
         })
     }
 
@@ -100,11 +109,13 @@ impl ChatBot {
     async fn run_chat_inference(&mut self, input: &str) -> Result<String> {
         let session = self.session.as_ref().unwrap();
         
-        // Build conversation with system prompt and history
-        let mut conversation = String::new();
-        
-        // Add system prompt for better behavior
-        conversation.push_str("<|system|>\nYou are a helpful, friendly, and knowledgeable AI assistant. Provide clear, detailed, and conversational responses. Be helpful and engaging while staying informative.</s>");
+        // Build messages array for Jinja template
+        let mut messages = vec![
+            serde_json::json!({
+                "role": "system",
+                "content": "You are ChatBOT, a helpful, friendly, and knowledgeable AI assistant. Your name is ChatBOT. When introducing yourself, always use the name ChatBOT. Provide clear, detailed, and conversational responses. Be helpful and engaging while staying informative."
+            })
+        ];
         
         // Add conversation history for context (last 3 exchanges to avoid token limits)
         let recent_history = self.conversation_history
@@ -114,13 +125,38 @@ impl ChatBot {
             .rev();
             
         for (user_msg, assistant_msg) in recent_history {
-            conversation.push_str(&format!("<|user|>\n{}</s><|assistant|>\n{}</s>", user_msg, assistant_msg));
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": user_msg
+            }));
+            messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": assistant_msg
+            }));
         }
         
         // Add current user message
-        conversation.push_str(&format!("<|user|>\n{}</s><|assistant|>\n", input.trim()));
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": input.trim()
+        }));
+        
+        // Render the conversation using Jinja template
+        let mut jinja_env = minijinja::Environment::new();
+        jinja_env.add_template("chat", &self.chat_template)
+            .map_err(|e| anyhow!("Failed to parse Jinja template: {}", e))?;
+        
+        let tmpl = jinja_env.get_template("chat")
+            .map_err(|e| anyhow!("Failed to get template: {}", e))?;
+        
+        let conversation = tmpl.render(context! {
+            messages => messages,
+            eos_token => "</s>",
+            add_generation_prompt => true
+        }).map_err(|e| anyhow!("Failed to render template: {}", e))?;
         
         println!("🗨️ Building conversation with {} previous exchanges", self.conversation_history.len().min(3));
+        println!("📝 Rendered template:\n{}", conversation);
         
         // Tokenize input
         let encoding = self.tokenizer.encode(conversation.as_str(), false)
