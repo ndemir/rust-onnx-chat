@@ -21,6 +21,17 @@ struct ModelConfig {
     vocab_size: usize,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct TokenizerConfig {
+    add_bos_token: bool,
+    add_eos_token: bool,
+    bos_token: String,
+    eos_token: String,
+    model_max_length: usize,
+    #[serde(default)]
+    pad_token: Option<String>,
+}
+
 fn default_eos_token_id() -> u32 { 2 }
 fn default_bos_token_id() -> u32 { 1 }
 fn default_max_position_embeddings() -> usize { 2048 }
@@ -31,9 +42,11 @@ pub struct ChatBot {
     tokenizer: Tokenizer,
     model_loaded: bool,
     eos_token_id: u32,
+    bos_token_id: u32,
     conversation_history: Vec<(String, String)>, // (user, assistant) pairs
     chat_template: String,
     config: ModelConfig,
+    tokenizer_config: TokenizerConfig,
 }
 
 impl ChatBot {
@@ -47,6 +60,7 @@ impl ChatBot {
         let tokenizer_path = "models/tinyllama/tokenizer.json"; // Using native TinyLlama tokenizer
         let model_path = "models/tinyllama/model.onnx";
         let config_path = "models/tinyllama/config.json";
+        let tokenizer_config_path = "models/tinyllama/tokenizer_config.json";
         
         // Load tokenizer
         println!("Loading native TinyLlama tokenizer (updated crate)...");
@@ -73,9 +87,19 @@ impl ChatBot {
         println!("📋 Model config loaded: max_position_embeddings={}, eos_token_id={}", 
                  config.max_position_embeddings, config.eos_token_id);
         
-        // Get EOS token ID from config (preferred) or tokenizer
+        // Load tokenizer config
+        println!("Loading tokenizer configuration...");
+        let tokenizer_config_str = fs::read_to_string(tokenizer_config_path)
+            .map_err(|e| anyhow!("Failed to load tokenizer_config.json: {}", e))?;
+        let tokenizer_config: TokenizerConfig = serde_json::from_str(&tokenizer_config_str)
+            .map_err(|e| anyhow!("Failed to parse tokenizer_config.json: {}", e))?;
+        println!("📖 Tokenizer config loaded: add_bos_token={}, model_max_length={}", 
+                 tokenizer_config.add_bos_token, tokenizer_config.model_max_length);
+        
+        // Get token IDs from config
         let eos_token_id = config.eos_token_id;
-        println!("🔚 EOS token ID from config: {}", eos_token_id);
+        let bos_token_id = config.bos_token_id;
+        println!("🔚 EOS token ID: {}, BOS token ID: {}", eos_token_id, bos_token_id);
         
         // Load Jinja template
         let template_path = "models/tinyllama/chat_template.jinja";
@@ -106,9 +130,11 @@ impl ChatBot {
             tokenizer,
             model_loaded,
             eos_token_id,
+            bos_token_id,
             conversation_history: Vec::new(),
             chat_template,
             config,
+            tokenizer_config,
         })
     }
 
@@ -189,12 +215,21 @@ impl ChatBot {
         println!("🗨️ Building conversation with {} previous exchanges", self.conversation_history.len().min(3));
         println!("📝 Rendered template:\n{}", conversation);
         
-        // Tokenize input
-        let encoding = self.tokenizer.encode(conversation.as_str(), false)
+        // Tokenize input with proper BOS handling
+        let add_special_tokens = self.tokenizer_config.add_bos_token;
+        let encoding = self.tokenizer.encode(conversation.as_str(), add_special_tokens)
             .map_err(|e| anyhow!("Tokenization failed: {}", e))?;
         
         let mut current_tokens = encoding.get_ids().to_vec();
-        println!("🔤 Tokenizing conversation → {} tokens", current_tokens.len());
+        
+        // If tokenizer didn't add BOS but config says we should, add it manually
+        if self.tokenizer_config.add_bos_token && !current_tokens.is_empty() && current_tokens[0] != self.bos_token_id {
+            current_tokens.insert(0, self.bos_token_id);
+        }
+        
+        println!("🔤 Tokenizing conversation → {} tokens (BOS: {})", 
+                 current_tokens.len(), 
+                 if self.tokenizer_config.add_bos_token { "added" } else { "not added" });
         
         let mut generated_tokens = Vec::new();
         let max_new_tokens = 100; // Longer responses
