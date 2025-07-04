@@ -21,8 +21,8 @@ impl ChatBot {
             .with_name("tinyllama_chat_bot")
             .build()?);
 
-        let tokenizer_path = "models/tinyllama_chat_onnx/tokenizer.json"; // Using native TinyLlama tokenizer
-        let model_path = "models/tinyllama_chat_onnx/model.onnx";
+        let tokenizer_path = "models/tinyllama/tokenizer.json"; // Using native TinyLlama tokenizer
+        let model_path = "models/tinyllama/model.onnx";
         
         // Load tokenizer
         println!("Loading native TinyLlama tokenizer (updated crate)...");
