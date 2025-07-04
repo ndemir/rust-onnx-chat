@@ -21,15 +21,15 @@ impl ChatBot {
             .with_name("tinyllama_chat_bot")
             .build()?);
 
-        let tokenizer_path = "tokenizer/tokenizer.json"; // Using compatible Llama-2 tokenizer
+        let tokenizer_path = "models/tinyllama_chat_onnx/tokenizer.json"; // Using native TinyLlama tokenizer
         let model_path = "models/tinyllama_chat_onnx/model.onnx";
         
         // Load tokenizer
-        println!("Loading TinyLlama tokenizer...");
+        println!("Loading native TinyLlama tokenizer (updated crate)...");
         let tokenizer = if Path::new(tokenizer_path).exists() {
             match Tokenizer::from_file(tokenizer_path) {
                 Ok(tokenizer) => {
-                    println!("✅ TinyLlama tokenizer loaded successfully!");
+                    println!("✅ Native TinyLlama tokenizer loaded successfully!");
                     tokenizer
                 },
                 Err(e) => {

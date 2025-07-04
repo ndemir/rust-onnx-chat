@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 ort = "1.16"
-tokenizers = "0.15"
+tokenizers = "0.20"
 tokio = { version = "1.0", features = ["full"] }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
