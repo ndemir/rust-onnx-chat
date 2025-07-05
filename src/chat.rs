@@ -262,13 +262,12 @@ impl ChatBot {
         // Build messages array for Jinja template
         let mut messages = vec![];
         
-        // Check if this is a chat model by looking for role markers in template
-        let is_chat_model = self.chat_template.contains("system") || 
-                           self.chat_template.contains("user") || 
-                           self.chat_template.contains("assistant");
+        // Check if this is a chat model.
+        // The heuristic is: if the template is not the hardcoded default, then it's a chat model.
+        let is_chat_model = self.chat_template != String::from("{% for message in messages %}{{ message['content'] }}{% if not loop.last %} {% endif %}{% endfor %}{% if add_generation_prompt %}{% endif %}");
         
-        // Only add system message for chat models
-        if is_chat_model {
+        // Only add system message for chat models that support the 'system' role
+        if is_chat_model && self.chat_template.contains("system") {
             messages.push(serde_json::json!({
                 "role": "system",
                 "content": "You are ChatBOT, a helpful, friendly, and knowledgeable AI assistant. Your name is ChatBOT. When introducing yourself, always use the name ChatBOT. Provide clear, detailed, and conversational responses. Be helpful and engaging while staying informative."
