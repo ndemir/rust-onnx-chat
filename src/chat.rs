@@ -341,8 +341,8 @@ impl ChatBot {
         
         let mut generated_tokens = Vec::new();
         let max_new_tokens = 100; // Longer responses
-        let temperature = 0.7; // Slightly more focused for better quality
-        let top_p = 0.95; // Higher top_p for more diverse vocabulary
+        let temperature = 0.1; // Much lower temperature for deterministic output
+        let top_p = 0.1; // Very focused sampling for consistency
         
         use rand::Rng;
         let mut rng = rand::thread_rng();
