@@ -102,6 +102,7 @@ pub struct ChatBot {
     special_tokens_map: SpecialTokensMap,
     eos_token_str: String,
     bos_token_str: String,
+    model_name: String,
 }
 
 impl ChatBot {
@@ -228,6 +229,7 @@ impl ChatBot {
             special_tokens_map,
             eos_token_str,
             bos_token_str,
+            model_name: model_name.to_string(),
         })
     }
 
@@ -236,9 +238,9 @@ impl ChatBot {
         match input.to_lowercase().as_str() {
             s if s.contains("model") || s.contains("onnx") => {
                 if self.model_loaded {
-                    return Ok("✅ TinyLlama-1.1B-Chat ONNX model loaded! Using full AI chat inference.".to_string());
+                    return Ok(format!("✅ {} ONNX model loaded! Using full AI chat inference.", self.model_name));
                 } else {
-                    return Ok("❌ TinyLlama model not loaded.".to_string());
+                    return Ok(format!("❌ {} model not loaded.", self.model_name));
                 }
             },
             "clear" | "reset" => {
@@ -378,7 +380,7 @@ impl ChatBot {
 
             // Run inference
             if step == 0 {
-                println!("🧠 Running TinyLlama chat inference...");
+                println!("🧠 Running {} chat inference...", self.model_name);
             }
             let outputs = session.run(vec![input_tensor, attention_tensor, position_tensor])?;
             
